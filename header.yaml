@@ -1,0 +1,16 @@
+# encoding: utf-8
+#
+# Rime 用户词库文件
+#
+# 转写自
+#   Sogou Cell Dict - 搜狗细胞词库
+#
+#   https://pinyin.sogou.com/dict/
+#
+# 原文件名：__place_holder__
+---
+name: __place_holder__
+version: "1.0"
+sort: by_weight
+use_preset_vocabulary: true
+...
