@@ -17,11 +17,20 @@ def simple_logger():
     handler = logging.FileHandler(filename="py.log", encoding="utf8")
     formatter = logging.Formatter("%(asctime)s %(levelname)-7s %(filename)12s:%(lineno)-3d %(message)s")
     handler.setFormatter(formatter)
+    console = logging.StreamHandler()
+    console.setFormatter(formatter)
+    console.setLevel(logging.INFO)
     logger.addHandler(handler)
+    logger.addHandler(console)
     return logger
 
 
 LOGGER = simple_logger()
+
+PH_SOURCE_FILE = "__source_file__"
+PH_DICT_NAME = "__dict_name__"
+
+HEADER_YAML = os.path.join(os.path.curdir, "header.yaml")
 
 
 def read_utf16_str(f: BufferedReader, offset=-1, size=2):
@@ -83,8 +92,7 @@ def syllable_table(f):
     获取全局音节表。
 
     汉语拼音所有的音节。
-    所以可以使用 zuo 作为退出条件，因为它是所有音节中的最后一个。
-    实际上也可以使用数量作为退出条件。
+    所以可以使用 zuo 作为退出条件，因为它是所有汉语音节中的最后一个。
 
     音节表的结构如下：
     - 2 字节：整数，代表这个拼音的索引
@@ -153,10 +161,10 @@ def word_table(f: BufferedReader, file_size, hz_offset, syllable_table, use_ext_
                 f.read(2)
                 freq = read_uint16(f)
                 f.read(8)
-                words.append((full_spell, word, str(freq)))
+                words.append((word, full_spell, str(freq)))
             else:
                 f.read(12)
-                words.append((full_spell, word))
+                words.append((word, full_spell))
 
     return words
 
@@ -174,38 +182,139 @@ def args():
     )
     ap.add_argument(
         "--rime-dir",
+        "-u",
+        type=str,
+        required=False,
+        help="Rime 用户文件夹。指定后会生成 Rime 词典文件，并放到指定的路径下。",
+    )
+    ap.add_argument(
+        "--dict-name",
         "-d",
         type=str,
         required=False,
-        help="Rime 用户文件夹。" "指定后会生成 Rime 词典文件，并放到指定的路径下。",
+        help=(
+            "如果指定了 '--rime-dir'，此选项会被用作生成的字典名称，且为必选项。"
+            "如果未指定 '--rime-dir'，此选项会被忽略。"
+        ),
     )
     return ap.parse_args()
 
 
-def read_and_save(scel, output, use_ext_as_frequency):
+def read_header(scel, dict_name):
+    with open(HEADER_YAML, encoding="utf8") as fp:
+        header = fp.read()
+    header = header.replace(PH_SOURCE_FILE, os.path.basename(scel))
+    header = header.replace(PH_DICT_NAME, dict_name)
+    header = header.strip()
+    return header
+
+
+def unique_words(cn_dicts, records):
+    def _words_set(path):
+        with open(path, encoding="utf8") as fp:
+            lines = fp.readlines()
+            index = lines.index("...\n")
+            if lines[-1].strip() == "":
+                lines = lines[:-1]
+            return set(map(lambda x: x.split("\t")[0], lines[index + 1 :]))
+
+    def _check_word(record, old_words):
+        if record[0] not in old_words:
+            return False
+        LOGGER.debug("词语 '%s' 重复。", record[0])
+        return True
+
+    res_records = records
+    for name in os.listdir(cn_dicts):
+        LOGGER.info("对比文件：%s", name)
+        words = _words_set(os.path.join(cn_dicts, name))
+        LOGGER.info("文件中包含 %d 个词语。", len(words))
+        res_records = [record for record in res_records if not _check_word(record, words)]
+    if len(records) > len(res_records):
+        LOGGER.info("去重词语 %d 个。", len(records) - len(res_records))
+    return res_records
+
+
+def make_path(dict_name, rime_dir):
+    cn_dicts = os.path.join(rime_dir, "cn_dicts")
+    os.makedirs(cn_dicts, exist_ok=True)
+    file_name = dict_name + ".dict.yaml"
+    full_path = os.path.join(cn_dicts, file_name)
+    if os.path.exists(full_path):
+        LOGGER.warning("目标文件存在，将被重写。")
+    return full_path, cn_dicts
+
+
+def read_scel(scel, use_ext_as_frequency):
     with open(scel, "rb") as fp:
         hz_offset = get_hz_offset(fp)
 
         meta = get_dict_meta(fp)
         LOGGER.info("细胞词库元信息：%s", meta)
-        output = output or meta.title + ".txt"
 
         py_map = syllable_table(fp)
 
         file_size = os.path.getsize(scel)
-        records = word_table(fp, file_size, hz_offset, py_map, use_ext_as_frequency)
-        with open(output, "w", encoding="utf8", newline="\n") as ofp:
-            lines = ["\t".join(record) for record in records]
-            ofp.write("\n".join(lines))
+        return meta, word_table(fp, file_size, hz_offset, py_map, use_ext_as_frequency)
+
+
+def to_raw_txt(records):
+    lines = ["\t".join(record) for record in records]
+    return "\n".join(lines)
+
+
+def writeout(output, raw_txt):
+    LOGGER.info("写入文件：%s", output)
+    with open(output, "w", encoding="utf8", newline="\n") as ofp:
+        ofp.write(raw_txt)
+
+
+def process_raw_txt(scel, output, use_ext_as_frequency):
+    meta, records = read_scel(scel, use_ext_as_frequency)
+    output = output or meta.title + ".txt"
+    raw_txt = to_raw_txt(records)
+    writeout(output, raw_txt)
+    return records
+
+
+def process_rime_dict(dict_name, rime_dir, records, header):
+    LOGGER.debug("Rime 用户文件夹：%s", rime_dir)
+    full_path, cn_dicts = make_path(dict_name, rime_dir)
+    uniq_words = unique_words(cn_dicts, records)
+    if len(uniq_words) == 0:
+        LOGGER.warning("所有词语都已被收录，跳过。")
+        return
+    LOGGER.info("新增词语 %d 个。", len(uniq_words))
+    raw_txt = to_raw_txt(uniq_words)
+    dict_content = header + "\n" + raw_txt
+    writeout(full_path, dict_content)
+    LOGGER.info("++-------------------------------------------++")
+    LOGGER.info("|| 词典文件已经写入，请挂载后重新部署 Rime。 ||")
+    LOGGER.info("++-------------------------------------------++")
+
+
+def check_args(args):
+    if not os.path.exists(args.scel):
+        raise ValueError("文件不存在：{}".format(args.scel_file))
+    if args.rime_dir and not args.dict_name:
+        raise ValueError("当 '--rime-dir' 不为空时，'--dict-name' 不可为空。")
 
 
 def process(args):
-    scel_file = args.scel
-    output = args.output
-    if not os.path.exists(scel_file):
-        raise ValueError("文件不存在：{}".format(scel_file))
-    use_ext_as_frequency = args.use_ext_as_frequency
-    read_and_save(scel_file, output, use_ext_as_frequency)
+    check_args(args)
+    scel, output, use_ext_as_frequency = (
+        args.scel,
+        args.output,
+        args.use_ext_as_frequency,
+    )
+    records = process_raw_txt(scel, output, use_ext_as_frequency)
+
+    if not args.rime_dir:
+        return
+
+    rime_dir, dict_name = args.rime_dir, args.dict_name
+    header = read_header(scel, dict_name)
+    process_rime_dict(dict_name, rime_dir, records, header)
 
 
 if __name__ == "__main__":

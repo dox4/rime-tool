@@ -7,9 +7,9 @@
 #
 #   https://pinyin.sogou.com/dict/
 #
-# 原文件名：__place_holder__
+# 原文件名：__source_file__
 ---
-name: __place_holder__
+name: __dict_name__
 version: "1.0"
 sort: by_weight
 use_preset_vocabulary: true
