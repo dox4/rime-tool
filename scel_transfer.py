@@ -111,7 +111,7 @@ def syllable_table(f):
     return syllables
 
 
-def word_table(f: BufferedReader, file_size, hz_offset, syllable_table):
+def word_table(f: BufferedReader, file_size, hz_offset, syllable_table, use_ext_as_frequency):
     """
     汉语词组表，在文件中的偏移值是 0x2628 或 0x26c4
     格式为多个同音词块，一个同音词块的格式如下：
@@ -148,9 +148,16 @@ def word_table(f: BufferedReader, file_size, hz_offset, syllable_table):
             word = read_utf16_str(f, -1, char_cnt)
             LOGGER.debug("获得词语：%s，长度：%d", word, char_cnt)
 
-            # 跳过 ext_len 和 ext 共 12 个字节
-            f.read(12)
-            words.append((full_spell, word))
+            # ext_len 和 ext 共 12 个字节
+            if use_ext_as_frequency:
+                f.read(2)
+                freq = read_uint16(f)
+                f.read(8)
+                words.append((full_spell, word, str(freq)))
+            else:
+                f.read(12)
+                words.append((full_spell, word))
+
     return words
 
 
@@ -158,10 +165,24 @@ def args():
     ap = argparse.ArgumentParser(description="搜狗细胞词库转写为拼音汉字对照表工具。")
     ap.add_argument("--scel", "-s", type=str, required=True, help="搜狗细胞词库文件。")
     ap.add_argument("--output", "-o", type=str, required=False, help="转写后输出的文件名，默认使用词库元信息中的标题。")
+    ap.add_argument(
+        "--use-ext-as-frequency",
+        required=False,
+        action="store_true",
+        default=False,
+        help="使用词库文件中的扩展字段第一个整数作为词频。",
+    )
+    ap.add_argument(
+        "--rime-dir",
+        "-d",
+        type=str,
+        required=False,
+        help="Rime 用户文件夹。" "指定后会生成 Rime 词典文件，并放到指定的路径下。",
+    )
     return ap.parse_args()
 
 
-def read_and_save(scel, output):
+def read_and_save(scel, output, use_ext_as_frequency):
     with open(scel, "rb") as fp:
         hz_offset = get_hz_offset(fp)
 
@@ -172,7 +193,7 @@ def read_and_save(scel, output):
         py_map = syllable_table(fp)
 
         file_size = os.path.getsize(scel)
-        records = word_table(fp, file_size, hz_offset, py_map)
+        records = word_table(fp, file_size, hz_offset, py_map, use_ext_as_frequency)
         with open(output, "w", encoding="utf8", newline="\n") as ofp:
             lines = ["\t".join(record) for record in records]
             ofp.write("\n".join(lines))
@@ -183,7 +204,8 @@ def process(args):
     output = args.output
     if not os.path.exists(scel_file):
         raise ValueError("文件不存在：{}".format(scel_file))
-    read_and_save(scel_file, output)
+    use_ext_as_frequency = args.use_ext_as_frequency
+    read_and_save(scel_file, output, use_ext_as_frequency)
 
 
 if __name__ == "__main__":
